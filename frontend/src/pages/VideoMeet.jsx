@@ -9,7 +9,7 @@ import ParticipantsPanel from '../components/meeting/ParticipantsPanel';
 import SettingsModal from '../components/meeting/SettingsModal';
 import { Box } from '@mui/material';
 
-const server_url = 'http://localhost:8000';
+const server_url = import.meta.env.VITE_API_URL;
 
 var connections = {};
 
