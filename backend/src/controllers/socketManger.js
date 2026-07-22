@@ -1,9 +1,11 @@
-import { Server } from "socket.io"
+import { Server } from "socket.io";
+import { Meeting } from "../models/meeting.model.js";
+import { User } from "../models/user.model.js";
 
-
-let connections = {}
-let messages = {}
-let timeOnline = {}
+let connections = {};
+let messages = {};
+let timeOnline = {};
+let socketIdToUsername = {};
 
 export const connectToSocket = (server) => {
     const io = new Server(server, {
@@ -15,105 +17,135 @@ export const connectToSocket = (server) => {
         }
     });
 
-
     io.on("connection", (socket) => {
+        console.log("Socket connected:", socket.id);
 
-        console.log("SOMETHING CONNECTED")
+        socket.on("join-call", async (roomName, username) => {
+            socket.room = roomName;
+            socket.username = username || "Guest";
+            socketIdToUsername[socket.id] = socket.username;
+            socket.join(roomName);
 
-        socket.on("join-call", (path) => {
-
-            if (connections[path] === undefined) {
-                connections[path] = []
+            if (connections[roomName] === undefined) {
+                connections[roomName] = [];
             }
-            connections[path].push(socket.id)
+            if (!connections[roomName].includes(socket.id)) {
+                connections[roomName].push(socket.id);
+            }
 
             timeOnline[socket.id] = new Date();
 
-            // connections[path].forEach(elem => {
-            //     io.to(elem)
-            // })
+            // Populate socket to username mapping for the room
+            const roomUsernames = {};
+            connections[roomName].forEach(id => {
+                roomUsernames[id] = socketIdToUsername[id] || "Guest";
+            });
 
-            for (let a = 0; a < connections[path].length; a++) {
-                io.to(connections[path][a]).emit("user-joined", socket.id, connections[path])
+            // Notify everyone in the room (including the joining socket)
+            for (let a = 0; a < connections[roomName].length; a++) {
+                io.to(connections[roomName][a]).emit("user-joined", socket.id, connections[roomName], roomUsernames);
             }
 
-            if (messages[path] !== undefined) {
-                for (let a = 0; a < messages[path].length; ++a) {
-                    io.to(socket.id).emit("chat-message", messages[path][a]['data'],
-                        messages[path][a]['sender'], messages[path][a]['socket-id-sender'])
+            // Sync meeting in database
+            try {
+                let meeting = await Meeting.findOne({ meetingCode: roomName, status: "active" });
+                if (!meeting) {
+                    const user = await User.findOne({ username });
+                    meeting = new Meeting({
+                        user_id: username,
+                        meetingCode: roomName,
+                        creator: user ? user._id : null,
+                        creatorUsername: username,
+                        participants: [username],
+                        status: "active",
+                        date: new Date()
+                    });
+                } else {
+                    if (!meeting.participants.includes(username)) {
+                        meeting.participants.push(username);
+                    }
+                }
+                await meeting.save();
+            } catch (err) {
+                console.error("Database error in socket join-call:", err);
+            }
+
+            // Emit previous messages in the room to the new user
+            if (messages[roomName] !== undefined) {
+                for (let a = 0; a < messages[roomName].length; ++a) {
+                    io.to(socket.id).emit(
+                        "chat-message",
+                        messages[roomName][a]['data'],
+                        messages[roomName][a]['sender'],
+                        messages[roomName][a]['socket-id-sender']
+                    );
                 }
             }
-
-        })
+        });
 
         socket.on("signal", (toId, message) => {
             io.to(toId).emit("signal", socket.id, message);
-        })
+        });
 
         socket.on("chat-message", (data, sender) => {
-
-            const [matchingRoom, found] = Object.entries(connections)
-                .reduce(([room, isFound], [roomKey, roomValue]) => {
-
-
-                    if (!isFound && roomValue.includes(socket.id)) {
-                        return [roomKey, true];
-                    }
-
-                    return [room, isFound];
-
-                }, ['', false]);
-
-            if (found === true) {
-                if (messages[matchingRoom] === undefined) {
-                    messages[matchingRoom] = []
+            const roomName = socket.room;
+            if (roomName && connections[roomName]) {
+                if (messages[roomName] === undefined) {
+                    messages[roomName] = [];
                 }
 
-                messages[matchingRoom].push({ 'sender': sender, "data": data, "socket-id-sender": socket.id })
-                console.log("message", matchingRoom, ":", sender, data)
+                messages[roomName].push({
+                    sender: sender,
+                    data: data,
+                    "socket-id-sender": socket.id
+                });
 
-                connections[matchingRoom].forEach((elem) => {
-                    io.to(elem).emit("chat-message", data, sender, socket.id)
-                })
+                console.log(`Message in room ${roomName} from ${sender}: ${data}`);
+
+                // Broadcast chat message to the room
+                io.to(roomName).emit("chat-message", data, sender, socket.id);
             }
+        });
 
-        })
+        socket.on("disconnect", async () => {
+            console.log("Socket disconnected:", socket.id);
+            const roomName = socket.room;
+            const joinTime = timeOnline[socket.id];
 
-        socket.on("disconnect", () => {
+            delete socketIdToUsername[socket.id];
+            delete timeOnline[socket.id];
 
-            var diffTime = Math.abs(timeOnline[socket.id] - new Date())
+            if (roomName && connections[roomName]) {
+                // Notify others in room
+                socket.to(roomName).emit("user-left", socket.id);
 
-            var key
-
-            for (const [k, v] of JSON.parse(JSON.stringify(Object.entries(connections)))) {
-
-                for (let a = 0; a < v.length; ++a) {
-                    if (v[a] === socket.id) {
-                        key = k
-
-                        for (let a = 0; a < connections[key].length; ++a) {
-                            io.to(connections[key][a]).emit('user-left', socket.id)
-                        }
-
-                        var index = connections[key].indexOf(socket.id)
-
-                        connections[key].splice(index, 1)
-
-
-                        if (connections[key].length === 0) {
-                            delete connections[key]
-                        }
-                    }
+                // Remove user from connection list
+                const index = connections[roomName].indexOf(socket.id);
+                if (index !== -1) {
+                    connections[roomName].splice(index, 1);
                 }
 
+                // If room is empty, clean it up and update meeting status
+                if (connections[roomName].length === 0) {
+                    delete connections[roomName];
+                    delete messages[roomName];
+
+                    try {
+                        const meeting = await Meeting.findOne({ meetingCode: roomName, status: "active" });
+                        if (meeting && joinTime) {
+                            const durationMs = Date.now() - meeting.date.getTime();
+                            meeting.duration = Math.max(1, Math.round(durationMs / 60000)); // duration in minutes
+                            meeting.status = "completed";
+                            await meeting.save();
+                            console.log(`Meeting ${roomName} marked completed. Duration: ${meeting.duration} mins`);
+                        }
+                    } catch (err) {
+                        console.error("Error updating meeting on room empty:", err);
+                    }
+                }
             }
-
-
-        })
-
-
-    })
-
+        });
+    });
 
     return io;
-}
+};

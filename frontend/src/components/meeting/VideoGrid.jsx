@@ -70,6 +70,7 @@ export default function VideoGrid({ localVideoRef, videos, username, hasSidebar,
         {/* Remote participant tiles */}
         {videos.map((v, i) => {
           const peerCameraOn = peerCameraStates?.[v.socketId] !== false;
+          const peerName = v.username || `Participant ${i + 1}`;
           return (
             <Box key={v.socketId} className={styles.videoTile}>
               <video
@@ -78,9 +79,9 @@ export default function VideoGrid({ localVideoRef, videos, username, hasSidebar,
                 autoPlay
                 playsInline
               />
-              {!peerCameraOn && <CameraOffOverlay name={`Participant ${i + 1}`} />}
+              {!peerCameraOn && <CameraOffOverlay name={peerName} />}
               <Box className={styles.participantLabel}>
-                <Typography variant="caption">Participant {i + 1}</Typography>
+                <Typography variant="caption">{peerName}</Typography>
               </Box>
             </Box>
           );
