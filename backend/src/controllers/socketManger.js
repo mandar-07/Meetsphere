@@ -9,12 +9,11 @@ let socketIdToUsername = {};
 
 export const connectToSocket = (server) => {
     const io = new Server(server, {
-        cors: {
-            origin: "*",
-            methods: ["GET", "POST"],
-            allowedHeaders: ["*"],
-            credentials: true
-        }
+    cors: {
+        origin: process.env.CLIENT_URL,
+        methods: ["GET", "POST"],
+        credentials: true,
+    },
     });
 
     io.on("connection", (socket) => {
