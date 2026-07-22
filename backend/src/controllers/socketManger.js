@@ -8,143 +8,167 @@ let timeOnline = {};
 let socketIdToUsername = {};
 
 export const connectToSocket = (server) => {
-    const io = new Server(server, {
+  const io = new Server(server, {
     cors: {
-        origin: process.env.CLIENT_URL,
-        methods: ["GET", "POST"],
-        credentials: true,
+      origin: process.env.CLIENT_URL,
+      methods: ["GET", "POST"],
+      credentials: true,
     },
+  });
+
+  io.on("connection", (socket) => {
+    console.log("==================================");
+    console.log("Socket Connected:", socket.id);
+
+    socket.on("join-call", async (roomName, username) => {
+      console.log("JOIN REQUEST");
+      console.log("Room:", roomName);
+      console.log("Username:", username);
+      console.log("Socket:", socket.id);
+
+      socket.room = roomName;
+      socket.username = username || "Guest";
+
+      socketIdToUsername[socket.id] = socket.username;
+      timeOnline[socket.id] = new Date();
+
+      socket.join(roomName);
+
+      if (!connections[roomName]) {
+        connections[roomName] = [];
+      }
+
+      if (!connections[roomName].includes(socket.id)) {
+        connections[roomName].push(socket.id);
+      }
+
+      console.log("Users in room:", connections[roomName].length);
+      console.log(connections);
+
+      const roomUsernames = {};
+
+      connections[roomName].forEach((id) => {
+        roomUsernames[id] = socketIdToUsername[id];
+      });
+
+      io.to(roomName).emit(
+        "user-joined",
+        socket.id,
+        connections[roomName],
+        roomUsernames
+      );
+
+      try {
+        let meeting = await Meeting.findOne({
+          meetingCode: roomName,
+          status: "active",
+        });
+
+        if (!meeting) {
+          const user = await User.findOne({ username });
+
+          meeting = new Meeting({
+            meetingCode: roomName,
+            creator: user ? user._id : null,
+            creatorUsername: username,
+            participants: [username],
+            status: "active",
+            date: new Date(),
+          });
+        } else {
+          if (!meeting.participants.includes(username)) {
+            meeting.participants.push(username);
+          }
+        }
+
+        await meeting.save();
+      } catch (err) {
+        console.log(err);
+      }
+
+      if (messages[roomName]) {
+        messages[roomName].forEach((msg) => {
+          io.to(socket.id).emit(
+            "chat-message",
+            msg.data,
+            msg.sender,
+            msg["socket-id-sender"]
+          );
+        });
+      }
     });
 
-    io.on("connection", (socket) => {
-        console.log("Socket connected:", socket.id);
+    socket.on("signal", (toId, message) => {
+      io.to(toId).emit("signal", socket.id, message);
+    });
 
-        socket.on("join-call", async (roomName, username) => {
-            socket.room = roomName;
-            socket.username = username || "Guest";
-            socketIdToUsername[socket.id] = socket.username;
-            socket.join(roomName);
+    socket.on("chat-message", (data, sender) => {
+      const roomName = socket.room;
 
-            if (connections[roomName] === undefined) {
-                connections[roomName] = [];
-            }
-            if (!connections[roomName].includes(socket.id)) {
-                connections[roomName].push(socket.id);
-            }
+      if (!roomName) return;
 
-            timeOnline[socket.id] = new Date();
+      if (!messages[roomName]) {
+        messages[roomName] = [];
+      }
 
-            // Populate socket to username mapping for the room
-            const roomUsernames = {};
-            connections[roomName].forEach(id => {
-                roomUsernames[id] = socketIdToUsername[id] || "Guest";
+      messages[roomName].push({
+        sender,
+        data,
+        "socket-id-sender": socket.id,
+      });
+
+      io.to(roomName).emit("chat-message", data, sender, socket.id);
+    });
+
+    socket.on("disconnect", async () => {
+      console.log("Socket Disconnected:", socket.id);
+
+      const roomName = socket.room;
+
+      delete socketIdToUsername[socket.id];
+      delete timeOnline[socket.id];
+
+      if (!roomName) return;
+
+      socket.to(roomName).emit("user-left", socket.id);
+
+      if (connections[roomName]) {
+        connections[roomName] = connections[roomName].filter(
+          (id) => id !== socket.id
+        );
+
+        console.log(
+          "Remaining users:",
+          connections[roomName].length
+        );
+
+        if (connections[roomName].length === 0) {
+          delete connections[roomName];
+          delete messages[roomName];
+
+          try {
+            const meeting = await Meeting.findOne({
+              meetingCode: roomName,
+              status: "active",
             });
 
-            // Notify everyone in the room (including the joining socket)
-            for (let a = 0; a < connections[roomName].length; a++) {
-                io.to(connections[roomName][a]).emit("user-joined", socket.id, connections[roomName], roomUsernames);
+            if (meeting) {
+              meeting.status = "completed";
+
+              meeting.duration = Math.max(
+                1,
+                Math.round((Date.now() - meeting.date.getTime()) / 60000)
+              );
+
+              await meeting.save();
             }
-
-            // Sync meeting in database
-            try {
-                let meeting = await Meeting.findOne({ meetingCode: roomName, status: "active" });
-                if (!meeting) {
-                    const user = await User.findOne({ username });
-                    meeting = new Meeting({
-                        user_id: username,
-                        meetingCode: roomName,
-                        creator: user ? user._id : null,
-                        creatorUsername: username,
-                        participants: [username],
-                        status: "active",
-                        date: new Date()
-                    });
-                } else {
-                    if (!meeting.participants.includes(username)) {
-                        meeting.participants.push(username);
-                    }
-                }
-                await meeting.save();
-            } catch (err) {
-                console.error("Database error in socket join-call:", err);
-            }
-
-            // Emit previous messages in the room to the new user
-            if (messages[roomName] !== undefined) {
-                for (let a = 0; a < messages[roomName].length; ++a) {
-                    io.to(socket.id).emit(
-                        "chat-message",
-                        messages[roomName][a]['data'],
-                        messages[roomName][a]['sender'],
-                        messages[roomName][a]['socket-id-sender']
-                    );
-                }
-            }
-        });
-
-        socket.on("signal", (toId, message) => {
-            io.to(toId).emit("signal", socket.id, message);
-        });
-
-        socket.on("chat-message", (data, sender) => {
-            const roomName = socket.room;
-            if (roomName && connections[roomName]) {
-                if (messages[roomName] === undefined) {
-                    messages[roomName] = [];
-                }
-
-                messages[roomName].push({
-                    sender: sender,
-                    data: data,
-                    "socket-id-sender": socket.id
-                });
-
-                console.log(`Message in room ${roomName} from ${sender}: ${data}`);
-
-                // Broadcast chat message to the room
-                io.to(roomName).emit("chat-message", data, sender, socket.id);
-            }
-        });
-
-        socket.on("disconnect", async () => {
-            console.log("Socket disconnected:", socket.id);
-            const roomName = socket.room;
-            const joinTime = timeOnline[socket.id];
-
-            delete socketIdToUsername[socket.id];
-            delete timeOnline[socket.id];
-
-            if (roomName && connections[roomName]) {
-                // Notify others in room
-                socket.to(roomName).emit("user-left", socket.id);
-
-                // Remove user from connection list
-                const index = connections[roomName].indexOf(socket.id);
-                if (index !== -1) {
-                    connections[roomName].splice(index, 1);
-                }
-
-                // If room is empty, clean it up and update meeting status
-                if (connections[roomName].length === 0) {
-                    delete connections[roomName];
-                    delete messages[roomName];
-
-                    try {
-                        const meeting = await Meeting.findOne({ meetingCode: roomName, status: "active" });
-                        if (meeting && joinTime) {
-                            const durationMs = Date.now() - meeting.date.getTime();
-                            meeting.duration = Math.max(1, Math.round(durationMs / 60000)); // duration in minutes
-                            meeting.status = "completed";
-                            await meeting.save();
-                            console.log(`Meeting ${roomName} marked completed. Duration: ${meeting.duration} mins`);
-                        }
-                    } catch (err) {
-                        console.error("Error updating meeting on room empty:", err);
-                    }
-                }
-            }
-        });
+          } catch (err) {
+            console.log(err);
+          }
+        }
+      }
     });
+  });
 
-    return io;
+  return io;
 };

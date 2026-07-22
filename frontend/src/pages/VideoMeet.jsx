@@ -13,13 +13,9 @@ import withAuth from '../utils/withAuth';
 
 // Derive the socket server origin from the Vite API URL
 // e.g. "https://meetsphere-vm2o.onrender.com/api/v1/users" → "https://meetsphere-vm2o.onrender.com"
-const server_url = (() => {
-  try {
-    return new URL(import.meta.env.VITE_API_URL).origin;
-  } catch {
-    return import.meta.env.VITE_API_URL;
-  }
-})();
+const server_url = import.meta.env.VITE_SOCKET_URL;
+
+console.log("Socket URL:", server_url);
 
 const peerConfigConnections = {
   iceServers: [
